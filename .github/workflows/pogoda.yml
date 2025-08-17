@@ -1,13 +1,15 @@
 name: Pogoda Alert (rain-only)
 
 on:
-  schedule:
-    - cron: '0 7 * * *'   # 07:00
-    - cron: '0 10 * * *'  # 10:00
-    - cron: '0 13 * * *'  # 13:00
-    - cron: '0 19 * * *'  # 19:00
-    - cron: '0 21 * * *'  # 21:00
+  # Ręczne uruchomienie z zakładki Actions
   workflow_dispatch:
+  # (opcjonalnie) automatyczny harmonogram – odkomentuj jeśli chcesz
+  # schedule:
+  #   - cron: '0 5 * * *'   # 07:00 CEST
+  #   - cron: '0 8 * * *'   # 10:00
+  #   - cron: '0 11 * * *'  # 13:00
+  #   - cron: '0 17 * * *'  # 19:00
+  #   - cron: '0 19 * * *'  # 21:00
 
 jobs:
   run:
@@ -16,21 +18,44 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
+      - name: Pokaż drzewo plików (debug)
+        run: |
+          echo "Repo root: $GITHUB_WORKSPACE"
+          find . -maxdepth 3 -type f -print
+
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install dependencies (if requirements.txt exists)
+        run: |
+          REQ=$(git ls-files | grep -m1 '^.*requirements\.txt$' || true)
+          if [ -n "$REQ" ]; then
+            echo "Found requirements: $REQ"
+            pip install -r "$REQ"
+          else
+            echo "No requirements.txt found, skipping."
+          fi
 
       - name: Run Pogoda Alert
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT:  ${{ secrets.TG_CHAT }}
         run: |
+          set -e
+          # Znajdź skrypt w repo (niezależnie od folderu)
+          SCRIPT=$(git ls-files | grep -m1 '^.*pogoda_alert\.py$' || true)
+          if [ -z "$SCRIPT" ]; then
+            echo "❌ Nie znaleziono pliku pogoda_alert.py w repo."
+            exit 1
+          fi
+          echo "Znaleziony skrypt: $SCRIPT"
+          cd "$(dirname "$SCRIPT")"
+          pwd
+          # -u = niebuforowane logi
           python -u pogoda_alert.py \
             --miasto "Szczecin" \
             --prog-opad 50 \
             --tg-token "$TG_TOKEN" \
-            --tg-chat "$TG_CHAT"
-        env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT: ${{ secrets.TG_CHAT }}
+            --tg-chat  "$TG_CHAT"
