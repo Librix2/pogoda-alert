@@ -2,11 +2,11 @@ name: Pogoda Alert (rain-only)
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # 07:00 CEST
-    - cron: '0 8 * * *'   # 10:00
-    - cron: '0 11 * * *'  # 13:00
-    - cron: '0 17 * * *'  # 19:00
-    - cron: '0 19 * * *'  # 21:00
+    - cron: '0 7 * * *'   # 07:00
+    - cron: '0 10 * * *'  # 10:00
+    - cron: '0 13 * * *'  # 13:00
+    - cron: '0 19 * * *'  # 19:00
+    - cron: '0 21 * * *'  # 21:00
   workflow_dispatch:
 
 jobs:
@@ -16,64 +16,21 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: Show tree (debug)
-        run: |
-          echo "Repo root: $GITHUB_WORKSPACE"
-          ls -la
-          echo "---"
-          ls -la .github || true
-          echo "---"
-          ls -la .github/workflows || true
-          echo "--- FULL TREE ---"
-          find . -maxdepth 3 -type f -print
-
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: Install dependencies (if requirements.txt exists)
-        run: |
-          REQ=$(git ls-files | grep -m1 '^.*requirements\.txt$' || true)
-          if [ -n "$REQ" ]; then
-            echo "Found requirements: $REQ"
-            pip install -r "$REQ"
-          else
-            echo "No requirements.txt found, skipping."
-          fi
-
-      - name: Restore state cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.pogoda_alert_state.json
-          key: pogoda-state-${{ github.run_id }}
-          restore-keys: |
-            pogoda-state-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
       - name: Run Pogoda Alert
-        env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          TG_CHAT:  ${{ secrets.TG_CHAT }}
         run: |
-          set -e
-          # Znajdź skrypt gdziekolwiek leży w repo:
-          SCRIPT=$(git ls-files | grep -m1 '^.*pogoda_alert\.py$' || true)
-          if [ -z "$SCRIPT" ]; then
-            echo "❌ Nie znaleziono pliku pogoda_alert.py w repo."
-            exit 1
-          fi
-          echo "Znaleziony skrypt: $SCRIPT"
-          # Uruchom z katalogu skryptu (na wypadek ścieżek względnych)
-          cd "$(dirname "$SCRIPT")"
-          pwd
-          python pogoda_alert.py \
+          python -u pogoda_alert.py \
             --miasto "Szczecin" \
             --prog-opad 50 \
             --tg-token "$TG_TOKEN" \
-            --tg-chat  "$TG_CHAT"
-
-      - name: Save state cache
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.pogoda_alert_state.json
-          key: pogoda-state-${{ github.run_id }}
+            --tg-chat "$TG_CHAT"
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
