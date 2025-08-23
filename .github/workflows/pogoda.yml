@@ -1,7 +1,15 @@
 name: Pogoda Alert (rain-only)
 
 on:
-  workflow_dispatch:  # pokaże przycisk "Run workflow"
+  # Automatyczny harmonogram (UTC) – lato w PL = CEST = UTC+2
+  schedule:
+    - cron: '0 5 * * *'   # 07:00 PL
+    - cron: '0 8 * * *'   # 10:00 PL
+    - cron: '0 11 * * *'  # 13:00 PL
+    - cron: '0 17 * * *'  # 19:00 PL
+    - cron: '0 19 * * *'  # 21:00 PL
+  # Ręczne uruchomienie z Actions
+  workflow_dispatch:
 
 jobs:
   run:
@@ -15,6 +23,15 @@ jobs:
         with:
           python-version: '3.10'
 
+      # Przywróć zapisany stan (żeby powiadamiać tylko przy ZMIANIE po pierwszym starcie)
+      - name: Restore state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.pogoda_alert_state.json
+          key: pogoda-state-${{ github.run_id }}
+          restore-keys: |
+            pogoda-state-
+
       - name: Run Pogoda Alert
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -26,9 +43,18 @@ jobs:
             echo "❌ Nie znaleziono pliku pogoda_alert.py w repo."
             exit 1
           fi
+          echo "Znaleziony skrypt: $SCRIPT"
           cd "$(dirname "$SCRIPT")"
+          # -u = niebuforowane logi
           python -u pogoda_alert.py \
             --miasto "Szczecin" \
             --prog-opad 50 \
             --tg-token "$TG_TOKEN" \
             --tg-chat  "$TG_CHAT"
+
+      # Zapisz zaktualizowany stan po biegu
+      - name: Save state cache
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pogoda_alert_state.json
+          key: pogoda-state-${{ github.run_id }}
