@@ -1,0 +1,30 @@
+name: Pogoda Alert (rain-only)
+
+on:
+  workflow_dispatch:  # pokaże przycisk "Run workflow"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Run Pogoda Alert
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT:  ${{ secrets.TG_CHAT }}
+        run: |
+          set -e
+          SCRIPT=$(git ls-files | grep -m1 '^.*pogoda_alert\.py$' || true)
+          if [ -z "$SCRIPT" ]; then
+            echo "❌ Nie znaleziono pliku pogoda_alert.py w repo."
+            exit 1
+          fi
+          cd "$(dirname "$SCRIPT")"
+          python -u pogoda_alert.py \
+            --miasto "Szczecin" \
+            --prog-opad 50 \
+            --tg-token "$TG_TOKEN" \
+            --tg-chat  "$TG_CHAT"
