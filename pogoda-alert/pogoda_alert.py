@@ -103,21 +103,26 @@ def main():
     print(header)
     print("-" * len(header))
 
-    # DESZCZ — powiadomienia tylko przy zmianie stanu
+    # DESZCZ — powiadomienia przy zmianie stanu lub przy pierwszym starcie
     next24 = next24_indices(times, now)
     has_rain = any(((precip_prob[i] or 0) >= args.prog_opad) or ((precip_mm[i] or 0) > 0) for i in next24)
     print("Status deszczu 24h:", "będzie" if has_rain else "brak")
 
     prev_rain = st.get("rain_state", None)
     send_rain, rain_msg = False, None
+
     if prev_rain is None:
-        print("Pierwsze uruchomienie – zapamiętuję stan, bez wysyłki.")
+        # Pierwszy start → od razu wysyłamy stan
         st["rain_state"] = has_rain
-    elif prev_rain != has_rain:
+        rain_msg = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
+        print("Pierwsze uruchomienie – wysyłam stan początkowy.")
         send_rain = True
+    elif prev_rain != has_rain:
+        # Zmiana stanu → wyślij
         st["rain_state"] = has_rain
         rain_msg = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
         print("Zmiana stanu →", "pojawił się deszcz" if has_rain else "zniknął deszcz")
+        send_rain = True
     else:
         print("Brak zmiany stanu – nie wysyłam powiadomienia.")
 
@@ -125,7 +130,7 @@ def main():
     if send_rain and rain_msg and args.tg_token and args.tg_chat:
         try:
             send_telegram(args.tg_token, args.tg_chat, f"[{loc['name']}] {rain_msg}", ctx)
-            print("Wysłano powiadomienie: deszcz")
+            print("Wysłano powiadomienie:", rain_msg)
         except Exception as e:
             print(f"Błąd wysyłki (deszcz): {e}", file=sys.stderr)
 
