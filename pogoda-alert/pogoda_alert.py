@@ -74,7 +74,7 @@ def send_telegram(token: str, chat_id: str, text: str, ctx):
 
 # ---------- Główna logika ----------
 def main():
-    ap = argparse.ArgumentParser(description="Pogoda alert: tylko deszcz (bez nocy)")
+    ap = argparse.ArgumentParser(description="Pogoda alert: tylko deszcz (debug szczegółowy)")
     ap.add_argument("--miasto", required=True)
     ap.add_argument("--prog-opad", type=int, default=50, help="Próg prawd. opadu w % (alert, gdy >= próg)")
     ap.add_argument("--tg-token", default="", help="Token bota Telegram")
@@ -106,19 +106,24 @@ def main():
     # DESZCZ — powiadomienia przy zmianie stanu lub przy pierwszym starcie
     next24 = next24_indices(times, now)
     has_rain = any(((precip_prob[i] or 0) >= args.prog_opad) or ((precip_mm[i] or 0) > 0) for i in next24)
+
     print("Status deszczu 24h:", "będzie" if has_rain else "brak")
+    print("Prognoza szczegółowa (następne 24h):")
+    for i in next24:
+        t = times[i]
+        prob = precip_prob[i] if i < len(precip_prob) else None
+        mm = precip_mm[i] if i < len(precip_mm) else None
+        print(f"  {t}: opad={mm} mm, prawd={prob}%")
 
     prev_rain = st.get("rain_state", None)
     send_rain, rain_msg = False, None
 
     if prev_rain is None:
-        # Pierwszy start → od razu wysyłamy stan
         st["rain_state"] = has_rain
         rain_msg = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
         print("Pierwsze uruchomienie – wysyłam stan początkowy.")
         send_rain = True
     elif prev_rain != has_rain:
-        # Zmiana stanu → wyślij
         st["rain_state"] = has_rain
         rain_msg = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
         print("Zmiana stanu →", "pojawił się deszcz" if has_rain else "zniknął deszcz")
@@ -126,7 +131,6 @@ def main():
     else:
         print("Brak zmiany stanu – nie wysyłam powiadomienia.")
 
-    # Wysyłka
     if send_rain and rain_msg and args.tg_token and args.tg_chat:
         try:
             send_telegram(args.tg_token, args.tg_chat, f"[{loc['name']}] {rain_msg}", ctx)
@@ -134,7 +138,6 @@ def main():
         except Exception as e:
             print(f"Błąd wysyłki (deszcz): {e}", file=sys.stderr)
 
-    # Zapis stanu i koniec
     save_state(st)
     sys.exit(0)
 
