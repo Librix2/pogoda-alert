@@ -205,16 +205,35 @@ def main():
     print(header)
     print("-" * len(header))
 
-    next24 = next24_indices(times, now)
-    has_rain = any(((precip_prob[i] or 0) >= args.prog_opad) or ((precip_mm[i] or 0) > 0) for i in next24)
+    def _to_float(x, default=0.0):
+    try:
+        # czasem przychodzi None lub string – zamień bezpiecznie na float
+        return float(x)
+    except Exception:
+        return float(default)
 
-    print("Status deszczu 24h:", "będzie" if has_rain else "brak")
-    # DEBUG – szczegóły prognozy
-    for i in next24:
-        t = times[i]
-        prob = precip_prob[i] if i < len(precip_prob) else None
-        mm = precip_mm[i] if i < len(precip_mm) else None
-        print(f"  {t}: opad={mm} mm, prawd={prob}%")
+next24 = next24_indices(times, now)
+
+# zbierz wartości z 24h okna
+vals = []
+for i in next24:
+    p = _to_float(precip_prob[i] if i < len(precip_prob) else 0)
+    m = _to_float(precip_mm[i]   if i < len(precip_mm)   else 0)
+    vals.append((i, p, m))
+
+max_prob = max((p for _, p, _ in vals), default=0.0)
+max_mm   = max((m for _, _, m in vals), default=0.0)
+
+# jednoznaczna decyzja: będzie deszcz, jeśli choć jeden z maksimów przekracza próg
+has_rain = (max_prob >= float(args.prog_opad)) or (max_mm > 0.0)
+
+print(f"Status deszczu 24h: {'będzie' if has_rain else 'brak'} "
+      f"(max prawd={max_prob:.0f}%, max opad={max_mm:.1f} mm)")
+
+# >>> DEBUG: pokaż szczegóły prognozy na 24h <<<
+for i, p, m in vals:
+    print(f"  {times[i]}: opad={m:.1f} mm, prawd={p:.0f}%")
+
 
     prev_rain = st.get("rain_state", None)
     send_rain, rain_msg = False, None
