@@ -208,9 +208,9 @@ def main():
     def _to_float(x, default=0.0):
     try:
         # czasem przychodzi None lub string – zamień bezpiecznie na float
-        return float(x)
+    return float(x)
     except Exception:
-        return float(default)
+    return float(default)
 
 next24 = next24_indices(times, now)
 
