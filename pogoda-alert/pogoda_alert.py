@@ -44,16 +44,23 @@ def next24_indices(times_iso: list[str], now: dt.datetime) -> list[int]:
     parsed = [dt.datetime.fromisoformat(t) for t in times_iso]
     return [i for i, t in enumerate(parsed) if now <= t <= now + dt.timedelta(hours=24)]
 
+def _to_float(x, default: float = 0.0) -> float:
+    """Bezpieczne rzutowanie na float (None/napisy → default)."""
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
 # ---------- Stan / pliki ----------
 def state_path() -> str:
     base = os.path.expanduser("~")
     return os.path.join(base, ".pogoda_alert_state.json")
 
 DEFAULT_STATE = {
-    "rain_state": None,             # True/False lub None (brak)
-    "subscribers": [],              # lista chat_id (int)
-    "last_update_id": None,         # ostatnio przetworzony update_id z getUpdates
-    "last_status_text": None,       # ostatni wysłany tekst (np. "[Szczecin] Brak deszczu...")
+    "rain_state": None,       # True/False lub None (brak)
+    "subscribers": [],        # lista chat_id (int)
+    "last_update_id": None,   # ostatnio przetworzony update_id z getUpdates
+    "last_status_text": None, # ostatni wysłany tekst (np. "[Szczecin] Brak deszczu...")
 }
 
 def load_state() -> dict:
@@ -123,7 +130,7 @@ def main():
     st = load_state()
 
     # 0) Zasiej subskrybentów z parametru --tg-chat (jeśli podano)
-    seed_ids = []
+    seed_ids: list[int] = []
     if args.tg_chat:
         for part in args.tg_chat.split(","):
             s = part.strip()
@@ -169,7 +176,6 @@ def main():
         if text == "/start":
             if unique_add(st["subscribers"], chat_id):
                 new_subs.append(chat_id)
-
         elif text == "/stop":
             if chat_id in st["subscribers"]:
                 st["subscribers"].remove(chat_id)
@@ -178,7 +184,7 @@ def main():
     if max_update_id is not None:
         st["last_update_id"] = max_update_id
 
-    # Wyślij potwierdzenia
+    # Wyślij potwierdzenia /stop
     for cid in removed_subs:
         try:
             send_telegram(args.tg_token, cid, "Zostałeś wypisany z alertów.", ctx)
@@ -186,6 +192,7 @@ def main():
         except Exception as e:
             print(f"Błąd wysyłki (stop) do {cid}: {e}", file=sys.stderr)
 
+    # Wyślij „ostatni wpis” do świeżych /start (jeśli mamy)
     if new_subs and st.get("last_status_text"):
         for cid in new_subs:
             try:
@@ -205,35 +212,25 @@ def main():
     print(header)
     print("-" * len(header))
 
-    def _to_float(x, default=0.0):
-    try:
-        # czasem przychodzi None lub string – zamień bezpiecznie na float
-    return float(x)
-    except Exception:
-    return float(default)
+    # Zbierz wartości z 24h okna i policz maksima
+    next24 = next24_indices(times, now)
+    vals: list[tuple[int, float, float]] = []
+    for i in next24:
+        p = _to_float(precip_prob[i] if i < len(precip_prob) else 0)
+        m = _to_float(precip_mm[i]   if i < len(precip_mm)   else 0)
+        vals.append((i, p, m))
 
-next24 = next24_indices(times, now)
+    max_prob = max((p for _, p, _ in vals), default=0.0)
+    max_mm   = max((m for _, _, m in vals), default=0.0)
 
-# zbierz wartości z 24h okna
-vals = []
-for i in next24:
-    p = _to_float(precip_prob[i] if i < len(precip_prob) else 0)
-    m = _to_float(precip_mm[i]   if i < len(precip_mm)   else 0)
-    vals.append((i, p, m))
+    has_rain = (max_prob >= float(args.prog_opad)) or (max_mm > 0.0)
 
-max_prob = max((p for _, p, _ in vals), default=0.0)
-max_mm   = max((m for _, _, m in vals), default=0.0)
+    print(f"Status deszczu 24h: {'będzie' if has_rain else 'brak'} "
+          f"(max prawd={max_prob:.0f}%, max opad={max_mm:.1f} mm)")
 
-# jednoznaczna decyzja: będzie deszcz, jeśli choć jeden z maksimów przekracza próg
-has_rain = (max_prob >= float(args.prog_opad)) or (max_mm > 0.0)
-
-print(f"Status deszczu 24h: {'będzie' if has_rain else 'brak'} "
-      f"(max prawd={max_prob:.0f}%, max opad={max_mm:.1f} mm)")
-
-# >>> DEBUG: pokaż szczegóły prognozy na 24h <<<
-for i, p, m in vals:
-    print(f"  {times[i]}: opad={m:.1f} mm, prawd={p:.0f}%")
-
+    # DEBUG – szczegóły prognozy godzinowej (ułatwia porównanie z innymi serwisami)
+    for i, p, m in vals:
+        print(f"  {times[i]}: opad={m:.1f} mm, prawd={p:.0f}%")
 
     prev_rain = st.get("rain_state", None)
     send_rain, rain_msg = False, None
