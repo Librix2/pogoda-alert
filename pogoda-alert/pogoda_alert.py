@@ -107,7 +107,7 @@ def unique_add(lst: list[int], item: int) -> bool:
 
 # ---------- Główna logika ----------
 def main():
-    ap = argparse.ArgumentParser(description="Pogoda alert: deszcz + auto-subskrypcje /start i /stop")
+    ap = argparse.ArgumentParser(description="Pogoda alert: deszcz + auto-subskrypcje (/start, /stop)")
     ap.add_argument("--miasto", required=True)
     ap.add_argument("--prog-opad", type=int, default=50, help="Próg prawd. opadu w % (alert, gdy >= próg)")
     ap.add_argument("--tg-token", default="", help="Token bota Telegram")
@@ -168,15 +168,16 @@ def main():
         msg = item.get("message") or item.get("edited_message") or {}
         chat = msg.get("chat") or {}
         text = (msg.get("text") or "").strip()
+        text_l = text.lower()
         chat_id = chat.get("id")
 
         if not isinstance(chat_id, int):
             continue
 
-        if text == "/start":
+        if text_l == "/start":
             if unique_add(st["subscribers"], chat_id):
                 new_subs.append(chat_id)
-        elif text == "/stop":
+        elif text_l == "/stop":
             if chat_id in st["subscribers"]:
                 st["subscribers"].remove(chat_id)
                 removed_subs.append(chat_id)
@@ -191,15 +192,6 @@ def main():
             print(f"Wypisano subskrybenta {cid}")
         except Exception as e:
             print(f"Błąd wysyłki (stop) do {cid}: {e}", file=sys.stderr)
-
-    # Wyślij „ostatni wpis” do świeżych /start (jeśli mamy)
-    if new_subs and st.get("last_status_text"):
-        for cid in new_subs:
-            try:
-                send_telegram(args.tg_token, cid, st["last_status_text"], ctx)
-                print(f"Wysłano ostatni wpis do nowego subskrybenta: {cid}")
-            except Exception as e:
-                print(f"Błąd wysyłki do {cid}: {e}", file=sys.stderr)
 
     # 2) Zbierz prognozę i policz status (24h)
     loc = geocode_city(args.miasto, ctx)
@@ -228,23 +220,38 @@ def main():
     print(f"Status deszczu 24h: {'będzie' if has_rain else 'brak'} "
           f"(max prawd={max_prob:.0f}%, max opad={max_mm:.1f} mm)")
 
-    # DEBUG – szczegóły prognozy godzinowej (ułatwia porównanie z innymi serwisami)
+    # DEBUG – szczegóły prognozy godzinowej
     for i, p, m in vals:
         print(f"  {times[i]}: opad={m:.1f} mm, prawd={p:.0f}%")
 
+    # Tekst bieżącego statusu (użyjemy go i dla nowych /start, i przy zmianie stanu)
+    core = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
+    current_status_text = f"[{loc['name']}] {core}"
+
+    # Wyślij bieżący status do świeżych /start (niezależnie od „ostatniego wpisu”)
+    if new_subs:
+        for cid in new_subs:
+            try:
+                send_telegram(args.tg_token, cid, current_status_text, ctx)
+                print(f"Wysłano bieżący status do nowego subskrybenta: {cid}")
+            except Exception as e:
+                print(f"Błąd wysyłki (welcome) do {cid}: {e}", file=sys.stderr)
+
+    # Aktualizuj „ostatni wpis” (na przyszłe /start)
+    st["last_status_text"] = current_status_text
+
+    # Logika zmiany stanu (i pierwszego uruchomienia)
     prev_rain = st.get("rain_state", None)
     send_rain, rain_msg = False, None
 
     if prev_rain is None:
         st["rain_state"] = has_rain
-        core = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
-        rain_msg = f"[{loc['name']}] {core}"
+        rain_msg = current_status_text
         print("Pierwsze uruchomienie – wysyłam stan początkowy.")
         send_rain = True
     elif prev_rain != has_rain:
         st["rain_state"] = has_rain
-        core = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
-        rain_msg = f"[{loc['name']}] {core}"
+        rain_msg = current_status_text
         print("Zmiana stanu →", "pojawił się deszcz" if has_rain else "zniknął deszcz")
         send_rain = True
     else:
@@ -252,7 +259,6 @@ def main():
 
     # 3) Wysyłka do wszystkich subskrybentów (oraz seed_ids)
     if send_rain and rain_msg:
-        st["last_status_text"] = rain_msg
         all_ids = list({*(st['subscribers']), *seed_ids})
         if not all_ids:
             print("Brak subskrybentów – pomijam wysyłkę.")
