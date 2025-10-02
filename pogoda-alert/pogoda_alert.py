@@ -99,9 +99,9 @@ def main():
     ctx = make_ssl_context(args.insecure)
     now = dt.datetime.now().replace(microsecond=0)
 
-    # Przerwa nocna 22:00–07:00
-    if now.hour >= 22 or now.hour < 7:
-        print(f"{now} – przerwa nocna (22:00–07:00), skrypt kończy pracę.")
+    # Przerwa nocna 22:00–06:59
+    if now.hour >= 22 or now.hour < 6:
+        print(f"{now} – przerwa nocna (22:00–06:59), skrypt kończy pracę.")
         sys.exit(0)
 
     st = load_state()
