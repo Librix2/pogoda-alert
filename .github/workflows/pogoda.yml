@@ -1,15 +1,9 @@
 name: Pogoda Alert (rain-only)
 
 on:
-  # Automatyczny harmonogram (UTC) – lato w PL = CEST = UTC+2
+  # Automatyczny harmonogram (UTC). Teraz: co godzinę 05:00–19:00 UTC = 07:00–21:00 w PL (czas letni).
   schedule:
-    - cron: '0 5 * * *'   # 07:00 PL
-    - cron: '0 8 * * *'   # 10:00 PL
-    - cron: '0 11 * * *'  # 13:00 PL
-    - cron: '0 14 * * *'  # 16:00 PL
-    - cron: '0 17 * * *'  # 19:00 PL
-    - cron: '0 19 * * *'  # 21:00 PL
-  # Ręczne uruchomienie
+    - cron: '0 5-19 * * *'
   workflow_dispatch:
 
 jobs:
