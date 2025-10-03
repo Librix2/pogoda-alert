@@ -50,6 +50,7 @@ jobs:
           python -u pogoda_alert.py \
             --miasto "Szczecin" \
             --prog-opad 50 \
+            --prog-mm 0.5 \
             --tg-token "$TG_TOKEN" \
             --tg-chat  "$TG_CHAT"
 
