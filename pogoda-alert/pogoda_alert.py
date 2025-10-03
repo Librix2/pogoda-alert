@@ -4,7 +4,6 @@ import argparse, datetime as dt, json, os, sys, ssl, urllib.parse, urllib.reques
 
 # ---------- SSL ----------
 def make_ssl_context(insecure: bool):
-    """Tworzy kontekst SSL. --insecure wyłącza weryfikację (awaryjnie)."""
     if insecure:
         return ssl._create_unverified_context()
     try:
@@ -49,245 +48,156 @@ def fetch_forecast(lat: float, lon: float, tz: str, ctx) -> dict:
 # ---------- Pomocnicze ----------
 def next24_indices(times_iso: list[str], now: dt.datetime) -> list[int]:
     parsed = [dt.datetime.fromisoformat(t) for t in times_iso]
-    return [i for i, t in enumerate(parsed) if now <= t <= now + dt.timedelta(hours=24)]
+    end = now + dt.timedelta(hours=24)
+    return [i for i, t in enumerate(parsed) if now <= t <= end]
 
-def _to_float(x, default: float = 0.0) -> float:
-    """Bezpieczna konwersja na float (radzi sobie z None/str)."""
+def _to_float(x, default=0.0):
     try:
         return float(x)
     except Exception:
         return float(default)
 
-# ---------- Stan / pliki ----------
+# ---------- Stan ----------
 def state_path() -> str:
     base = os.path.expanduser("~")
     return os.path.join(base, ".pogoda_alert_state.json")
-
-DEFAULT_STATE = {
-    "rain_state": None,       # True/False lub None (brak)
-    "subscribers": [],        # lista chat_id (int)
-    "last_update_id": None,   # ostatnio przetworzony update_id z getUpdates
-    "last_status_text": None, # ostatni wysłany tekst (np. "[Szczecin] Brak deszczu...")
-}
 
 def load_state() -> dict:
     p = state_path()
     if os.path.exists(p):
         try:
             with open(p, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            for k, v in DEFAULT_STATE.items():
-                if k not in data:
-                    data[k] = v
-            return data
+                return json.load(f)
         except Exception:
             pass
-    return DEFAULT_STATE.copy()
+    # domyślny stan – None => pierwsze uruchomienie
+    return {"rain_state": None, "rain_count": 0}
 
 def save_state(st: dict):
     with open(state_path(), "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
 
 # ---------- Telegram ----------
-def send_telegram(token: str, chat_id: str | int, text: str, ctx):
+def send_telegram(token: str, chat_id: str, text: str, ctx):
     api = f"https://api.telegram.org/bot{token}/sendMessage"
-    params = {"chat_id": str(chat_id), "text": text, "disable_web_page_preview": "true"}
+    params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}
     data = urllib.parse.urlencode(params).encode("utf-8")
     req = urllib.request.Request(api, data=data, method="POST")
     with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
         _ = resp.read()
 
-def get_updates(token: str, offset: int | None, ctx) -> dict:
-    api = f"https://api.telegram.org/bot{token}/getUpdates"
-    params = {}
-    if offset is not None:
-        params["offset"] = offset
-    url = api + ("?" + urllib.parse.urlencode(params) if params else "")
-    with urllib.request.urlopen(url, timeout=15, context=ctx) as resp:
-        return json.load(resp)
-
-def unique_add(lst: list[int], item: int) -> bool:
-    if item not in lst:
-        lst.append(item)
-        return True
-    return False
-
 # ---------- Główna logika ----------
 def main():
-    ap = argparse.ArgumentParser(description="Pogoda alert: próg % lub próg mm + subskrypcje (/start, /stop)")
+    ap = argparse.ArgumentParser(description="Pogoda alert: deszcz (z debounce i status na 1. uruchomieniu)")
     ap.add_argument("--miasto", required=True)
     ap.add_argument("--prog-opad", type=int, default=50, help="Próg prawd. opadu w % (alert, gdy >= próg)")
-    ap.add_argument("--prog-opad-mm", type=float, default=0.3, help="Próg godzinowego opadu w mm (alert, gdy >= próg)")
+    ap.add_argument("--prog-mm", type=float, default=0.5, help="Próg sumy opadu w mm (alert, gdy >= próg)")
     ap.add_argument("--tg-token", default="", help="Token bota Telegram")
-    ap.add_argument("--tg-chat", default="", help="Początkowe chat ID (po przecinku, opcjonalnie)")
+    ap.add_argument("--tg-chat", default="", help="Chat ID Telegram")
     ap.add_argument("--insecure", action="store_true", help="Wyłącz weryfikację SSL (awaryjnie)")
     args = ap.parse_args()
 
     ctx = make_ssl_context(args.insecure)
     now = dt.datetime.now().replace(microsecond=0)
 
-    # Przerwa nocna do 06:59 (run o 07:00 ma działać)
-    if (now.hour >= 22) or (now.hour < 6) or (now.hour == 6 and now.minute <= 59):
+    # Przerwa nocna 22:00–06:59 (żeby bieg 07:00 już działał)
+    if now.hour >= 22 or now.hour < 7:
         print(f"{now} – przerwa nocna (22:00–06:59), skrypt kończy pracę.")
         sys.exit(0)
 
-    if not args.tg_token:
-        print("Brak tokenu Telegram (--tg-token). Kończę.", file=sys.stderr)
-        sys.exit(2)
+    # parametry "złotego środka"
+    DEBOUNCE_NEED = 2       # ile kolejnych wykryć "deszcz" potrzeba, by wysłać alert
+    IMMEDIATE_MM  = 2.0     # jeśli max_mm >= IMMEDIATE_MM -> wyślij natychmiast
 
+    # Stan
     st = load_state()
+    prev_rain  = st.get("rain_state", None)   # None => pierwsze uruchomienie
+    rain_count = int(st.get("rain_count", 0))
 
-    # 0) Zasiej subskrybentów z parametru --tg-chat (jeśli podano)
-    seed_ids: list[int] = []
-    if args.tg_chat:
-        for part in args.tg_chat.split(","):
-            s = part.strip()
-            if s:
-                try:
-                    seed_ids.append(int(s))
-                except ValueError:
-                    print(f"Ostrzeżenie: pominięto nieprawidłowy chat_id: {s}", file=sys.stderr)
-    added_seed = 0
-    for cid in seed_ids:
-        if unique_add(st["subscribers"], cid):
-            added_seed += 1
-    if added_seed:
-        print(f"Dodano {added_seed} subskrybent(ów) z --tg-chat.")
-
-    # 1) Obsłuż /start i /stop
-    try:
-        offset = st["last_update_id"] + 1 if st["last_update_id"] is not None else None
-    except Exception:
-        offset = None
-    try:
-        upd = get_updates(args.tg_token, offset, ctx)
-    except Exception as e:
-        print(f"Ostrzeżenie: getUpdates nie powiodło się: {e}", file=sys.stderr)
-        upd = {"ok": False, "result": []}
-
-    new_subs: list[int] = []
-    removed_subs: list[int] = []
-    max_update_id = st["last_update_id"]
-
-    for item in upd.get("result", []):
-        uid = item.get("update_id")
-        if max_update_id is None or (isinstance(uid, int) and uid > max_update_id):
-            max_update_id = uid
-        msg = item.get("message") or item.get("edited_message") or {}
-        chat = msg.get("chat") or {}
-        text = (msg.get("text") or "").strip()
-        text_l = text.lower()
-        chat_id = chat.get("id")
-
-        if not isinstance(chat_id, int):
-            continue
-
-        if text_l == "/start":
-            if unique_add(st["subscribers"], chat_id):
-                new_subs.append(chat_id)
-        elif text_l == "/stop":
-            if chat_id in st["subscribers"]:
-                st["subscribers"].remove(chat_id)
-                removed_subs.append(chat_id)
-
-    if max_update_id is not None:
-        st["last_update_id"] = max_update_id
-
-    # Potwierdzenia /stop
-    for cid in removed_subs:
-        try:
-            send_telegram(args.tg_token, cid, "Zostałeś wypisany z alertów.", ctx)
-            print(f"Wypisano subskrybenta {cid}")
-        except Exception as e:
-            print(f"Błąd wysyłki (stop) do {cid}: {e}", file=sys.stderr)
-
-    # 2) Prognoza i decyzja na 24h
+    # Prognoza
     loc = geocode_city(args.miasto, ctx)
     fc = fetch_forecast(loc["latitude"], loc["longitude"], loc["timezone"], ctx)
     times = fc["hourly"]["time"]
-    precip_mm = [_to_float(x, 0.0) for x in fc["hourly"].get("precipitation", [0]*len(times))]
-    precip_prob = [int(_to_float(x, 0.0)) for x in fc["hourly"].get("precipitation_probability", [0]*len(times))]
+    precip_mm   = fc["hourly"].get("precipitation", [0]*len(times))
+    precip_prob = fc["hourly"].get("precipitation_probability", [0]*len(times))
 
     header = f"Lokalizacja: {loc['name']}, {loc['country']} — {now.strftime('%d.%m.%Y %H:%M')}"
     print(header)
     print("-" * len(header))
 
-    idx24 = next24_indices(times, now)
+    # Okno 24h
+    idxs = next24_indices(times, now)
     vals = []
-    for i in idx24:
-        p = precip_prob[i] if i < len(precip_prob) else 0
-        m = precip_mm[i] if i < len(precip_mm) else 0.0
-        vals.append((i, p, m))
+    for i in idxs:
+        p = _to_float(precip_prob[i] if i < len(precip_prob) else 0.0, 0.0)
+        m = _to_float(precip_mm[i]   if i < len(precip_mm)   else 0.0, 0.0)
+        vals.append((p, m))
 
-    max_prob = max((p for _, p, _ in vals), default=0)
-    max_mm   = max((m for _, _, m in vals), default=0.0)
+    max_prob = max((p for p, _ in vals), default=0.0)
+    max_mm   = max((m for _, m in vals), default=0.0)
 
-    # ZŁOTY ŚRODEK: reaguj gdy (prawdopodobieństwo ≥ próg) LUB (opad ≥ próg_mm)
-    prob_trigger = any(precip_prob[i] >= args.prog_opad for i in idx24)
-    mm_trigger   = any(precip_mm[i]   >= args.prog_opad_mm for i in idx24)
-    has_rain = prob_trigger or mm_trigger
+    detected_now = (max_prob >= float(args.prog_opad)) or (max_mm >= float(args.prog_mm))
+    print(f"Status deszczu 24h: {'będzie' if detected_now else 'brak'} "
+          f"(max prawd={int(max_prob)}%, max opad={max_mm:.1f} mm, progi: {int(args.prog_opad)}%, {args.prog_mm} mm)")
 
-    print(
-        f"Status deszczu 24h: {'będzie' if has_rain else 'brak'} "
-        f"(max prawd={max_prob}%, max opad={max_mm:.1f} mm, próg%={args.prog_opad}, próg_mm={args.prog_opad_mm:g})"
-    )
+    # szczegóły (krótko)
+    for i in idxs[:24]:  # wypisz max 24 wiersze, żeby nie zalewać logów
+        prob = _to_float(precip_prob[i] if i < len(precip_prob) else 0.0, 0.0)
+        mm   = _to_float(precip_mm[i]   if i < len(precip_mm)   else 0.0, 0.0)
+        print(f"  {times[i]}: opad={mm:.1f} mm, prawd={int(prob)}%")
 
-    # DEBUG – szczegóły godzinowe
-    for i, p, m in [(i, precip_prob[i], precip_mm[i]) for i in idx24]:
-        print(f"  {times[i]}: opad={m:.1f} mm, prawd={p}%")
+    # Debounce i decyzja powiadomienia
+    send_rain = False
+    msg = None
 
-    # Tekst bieżącego statusu (dla nowych /start i dla alertów)
-    core = "Deszcz w prognozie w ciągu 24 godzin." if has_rain else "Brak deszczu przez najbliższe 24h."
-    current_status_text = f"[{loc['name']}] {core}"
+    first_run = (prev_rain is None)
 
-    # Przywitaj świeżych /start bieżącym stanem
-    if new_subs:
-        for cid in new_subs:
-            try:
-                send_telegram(args.tg_token, cid, current_status_text, ctx)
-                print(f"Wysłano bieżący status do nowego subskrybenta: {cid}")
-            except Exception as e:
-                print(f"Błąd wysyłki (welcome) do {cid}: {e}", file=sys.stderr)
-
-    # Aktualizuj ostatni wpis
-    st["last_status_text"] = current_status_text
-
-    # Zmiana stanu / pierwsze uruchomienie
-    prev_rain = st.get("rain_state", None)
-    send_rain, rain_msg = False, None
-
-    if prev_rain is None:
-        st["rain_state"] = has_rain
-        rain_msg = current_status_text
+    if first_run:
+        # Na pierwszym uruchomieniu – zawsze wyślij stan
+        send_rain = True
+        st["rain_state"] = bool(detected_now)
+        st["rain_count"] = 1 if detected_now else 0
+        msg = "Deszcz w prognozie w ciągu 24 godzin." if detected_now else "Brak deszczu przez najbliższe 24h."
         print("Pierwsze uruchomienie – wysyłam stan początkowy.")
-        send_rain = True
-    elif prev_rain != has_rain:
-        st["rain_state"] = has_rain
-        rain_msg = current_status_text
-        print("Zmiana stanu →", "pojawił się deszcz" if has_rain else "zniknął deszcz")
-        send_rain = True
     else:
-        print("Brak zmiany stanu – nie wysyłam powiadomienia.")
-
-    # Wysyłka do wszystkich subskrybentów (plus seed_ids)
-    if send_rain and rain_msg:
-        all_ids = list({*(st['subscribers']), *seed_ids})
-        if not all_ids:
-            print("Brak subskrybentów – pomijam wysyłkę.")
+        # aktualizuj licznik "deszcz widoczny"
+        if detected_now:
+            rain_count += 1
         else:
-            for cid in all_ids:
-                try:
-                    send_telegram(args.tg_token, cid, rain_msg, ctx)
-                    print(f"Wysłano powiadomienie do {cid}: {rain_msg}")
-                except Exception as e:
-                    print(f"Błąd wysyłki do {cid}: {e}", file=sys.stderr)
+            rain_count = 0
 
-    # (opcjonalnie) pokaż listę subskrybentów
-    print("Lista subskrybentów zapisanych w stanie:")
-    for cid in st["subscribers"]:
-        print(" -", cid)
+        # zmiana na DESZCZ
+        if (not prev_rain) and detected_now:
+            if (max_mm >= IMMEDIATE_MM) or (rain_count >= DEBOUNCE_NEED):
+                send_rain = True
+                st["rain_state"] = True
+                msg = "Deszcz w prognozie w ciągu 24 godzin."
+                print("Zmiana stanu → pojawił się deszcz (warunek spełniony).")
+            else:
+                print("Wykryto kandydat na deszcz, ale czekam na potwierdzenie (debounce).")
 
-    # Zapis stanu
+        # zmiana na BRAK DESZCZU – bez debounce, żeby szybciej „otworzyć namiot”
+        elif prev_rain and (not detected_now):
+            send_rain = True
+            st["rain_state"] = False
+            msg = "Brak deszczu przez najbliższe 24h."
+            print("Zmiana stanu → zniknął deszcz.")
+
+        # brak zmiany
+        else:
+            print("Brak zmiany stanu – nie wysyłam powiadomienia.")
+            st["rain_state"] = bool(detected_now)
+
+        st["rain_count"] = rain_count
+
+    # Wysyłka
+    if send_rain and msg and args.tg_token and args.tg_chat:
+        try:
+            send_telegram(args.tg_token, args.tg_chat, f"[{loc['name']}] {msg}", ctx)
+            print(f"Wysłano powiadomienie do {args.tg_chat}: {msg}")
+        except Exception as e:
+            print(f"Błąd wysyłki (Telegram): {e}", file=sys.stderr)
+
     save_state(st)
     sys.exit(0)
 
